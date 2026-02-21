@@ -317,10 +317,9 @@ main() {
   done
   echo ""
   echo "next steps:"
-  echo "  1. go build -o rift ./cmd/rift"
-  echo "  2. ./start-mock-server.sh"
-  echo "  3. ./run-rift.sh"
-  echo "  4. ./rift ui  (then press 'k' for k9s)"
+  echo "  1. make mock       (in a separate terminal)"
+  echo "  2. make dev-sync"
+  echo "  3. ./rift ui       (then press 'k' for k9s)"
 }
 
 main "$@"
