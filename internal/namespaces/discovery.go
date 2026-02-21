@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phenixrizen/rift/internal/config"
 	"github.com/phenixrizen/rift/internal/state"
 	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +33,7 @@ type tokenResponse struct {
 	} `json:"status"`
 }
 
-func Enrich(ctx context.Context, st *state.State, logger *slog.Logger) (Result, error) {
+func Enrich(ctx context.Context, st *state.State, appCfg config.Config, logger *slog.Logger) (Result, error) {
 	result := Result{Enabled: true}
 	if st == nil || len(st.Clusters) == 0 {
 		return result, nil
@@ -58,7 +59,7 @@ func Enrich(ctx context.Context, st *state.State, logger *slog.Logger) (Result, 
 		}
 		result.ClustersTried++
 		g.Go(func() error {
-			namespaces, err := fetchClusterNamespaces(gctx, cluster)
+			namespaces, err := fetchClusterNamespaces(gctx, cluster, appCfg)
 			mu.Lock()
 			outcomes = append(outcomes, outcome{idx: idx, namespaces: namespaces, err: err})
 			mu.Unlock()
@@ -98,10 +99,16 @@ func Enrich(ctx context.Context, st *state.State, logger *slog.Logger) (Result, 
 	return result, nil
 }
 
-func fetchClusterNamespaces(ctx context.Context, cluster state.ClusterRecord) ([]string, error) {
-	token, err := fetchToken(ctx, cluster)
-	if err != nil {
-		return nil, err
+func fetchClusterNamespaces(ctx context.Context, cluster state.ClusterRecord, appCfg config.Config) ([]string, error) {
+	var token string
+	if tok, ok := appCfg.DevEndpoints.KubeToken(cluster.ClusterEndpoint); ok {
+		token = tok
+	} else {
+		var err error
+		token, err = fetchToken(ctx, cluster)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	caData := []byte(cluster.ClusterCertificateBase64)

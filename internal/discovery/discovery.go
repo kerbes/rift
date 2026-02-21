@@ -40,14 +40,47 @@ type Inventory struct {
 	Clusters    []ClusterAccess
 }
 
+// Discover queries AWS SSO for all accessible accounts and roles, then queries
+// EKS in each configured region to build a full inventory of clusters.
+//
+// If cfg.DevEndpoints is active, all AWS API calls are redirected to the local
+// mock server instead of real AWS, and the SSO token cache is bypassed in favour
+// of the access token in cfg.DevEndpoints.AccessToken.
 func Discover(ctx context.Context, cfg config.Config, logger *slog.Logger) (Inventory, error) {
 	now := time.Now().UTC()
-	token, err := loadTokenFromCache(cfg.SSOStartURL, cfg.SSORegion, now)
-	if err != nil {
-		return Inventory{}, err
+
+	var token tokenInfo
+
+	if cfg.DevEndpoints.IsActive() {
+		// Dev mode: skip the SSO token cache and use the configured fake token.
+		// This allows discovery to run without a real AWS SSO session.
+		token = tokenInfo{
+			AccessToken: cfg.DevEndpoints.AccessToken,
+			ExpiresAt:   now.Add(24 * time.Hour),
+		}
+		if logger != nil {
+			logger.Info("dev mode active: using mock AWS endpoints",
+				"sso_endpoint", cfg.DevEndpoints.SSOEndpoint,
+				"eks_endpoint", cfg.DevEndpoints.EKSEndpoint,
+			)
+		}
+	} else {
+		// Production mode: load the SSO bearer token from the local AWS CLI cache,
+		// which is populated by `aws sso login`.
+		var err error
+		token, err = loadTokenFromCache(cfg.SSOStartURL, cfg.SSORegion, now)
+		if err != nil {
+			return Inventory{}, err
+		}
 	}
 
-	ssoClient := sso.New(sso.Options{Region: cfg.SSORegion})
+	// Build the SSO client, optionally pointing it at the mock server.
+	ssoOpts := sso.Options{Region: cfg.SSORegion}
+	if cfg.DevEndpoints.IsActive() && cfg.DevEndpoints.SSOEndpoint != "" {
+		ssoOpts.BaseEndpoint = aws.String(cfg.DevEndpoints.SSOEndpoint)
+	}
+	ssoClient := sso.New(ssoOpts)
+
 	accounts, err := listAccounts(ctx, ssoClient, token.AccessToken)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("list accounts: %w", err)
@@ -63,7 +96,14 @@ func Discover(ctx context.Context, cfg config.Config, logger *slog.Logger) (Inve
 		Roles:       roles,
 	}
 
-	clusters, err := listAllClusters(ctx, ssoClient, token.AccessToken, cfg.Regions, roles, logger)
+	// Pass the dev EKS endpoint (empty string in production) through to cluster
+	// discovery so each per-region EKS client can be redirected if needed.
+	devEKSEndpoint := ""
+	if cfg.DevEndpoints.IsActive() {
+		devEKSEndpoint = cfg.DevEndpoints.EKSEndpoint
+	}
+
+	clusters, err := listAllClusters(ctx, ssoClient, token.AccessToken, cfg.Regions, roles, devEKSEndpoint, logger)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("list clusters: %w", err)
 	}
@@ -84,6 +124,10 @@ func Discover(ctx context.Context, cfg config.Config, logger *slog.Logger) (Inve
 }
 
 func ValidateSSOLogin(cfg config.Config, now time.Time) error {
+	// In dev mode there is no real SSO session to validate.
+	if cfg.DevEndpoints.IsActive() {
+		return nil
+	}
 	_, err := loadTokenFromCache(cfg.SSOStartURL, cfg.SSORegion, now)
 	return err
 }
@@ -146,12 +190,18 @@ func listRoles(ctx context.Context, client *sso.Client, accessToken string, acco
 	return roles, nil
 }
 
+// listAllClusters discovers EKS clusters for every role across all configured
+// regions. Up to 8 role/region combinations are queried concurrently.
+//
+// devEKSEndpoint, when non-empty, overrides the EKS service endpoint for every
+// client created in this function. Pass an empty string in production.
 func listAllClusters(
 	ctx context.Context,
 	ssoClient *sso.Client,
 	accessToken string,
 	regions []string,
 	roles []RoleAccess,
+	devEKSEndpoint string, // empty in production; set to mock URL in dev mode
 	logger *slog.Logger,
 ) ([]ClusterAccess, error) {
 	if len(roles) == 0 {
@@ -179,7 +229,7 @@ func listAllClusters(
 
 			roleClusters := make([]ClusterAccess, 0)
 			for _, region := range regions {
-				found, err := listClustersForRegion(ctx, region, role, creds)
+				found, err := listClustersForRegion(ctx, region, role, creds, devEKSEndpoint)
 				if err != nil {
 					if logger != nil {
 						logger.Warn("unable to list clusters", "account_id", role.AccountID, "account", role.AccountName, "role", role.RoleName, "region", region, "error", err)
@@ -222,12 +272,25 @@ func getRoleCredentials(ctx context.Context, client *sso.Client, accessToken, ac
 	return provider, nil
 }
 
-func listClustersForRegion(ctx context.Context, region string, role RoleAccess, provider aws.CredentialsProvider) ([]ClusterAccess, error) {
-	cfg := aws.Config{
+// listClustersForRegion queries EKS in a single region for a single role.
+//
+// devEKSEndpoint, when non-empty, redirects the EKS client to the local mock
+// server. The mock server receives the same API calls as real EKS and returns
+// the clusters defined in its topology file. Pass an empty string in production.
+func listClustersForRegion(ctx context.Context, region string, role RoleAccess, provider aws.CredentialsProvider, devEKSEndpoint string) ([]ClusterAccess, error) {
+	awsCfg := aws.Config{
 		Region:      region,
 		Credentials: aws.NewCredentialsCache(provider),
 	}
-	eksClient := eks.NewFromConfig(cfg)
+
+	// Build EKS client options, injecting a custom endpoint when in dev mode.
+	eksOptions := []func(*eks.Options){}
+	if devEKSEndpoint != "" {
+		eksOptions = append(eksOptions, func(o *eks.Options) {
+			o.BaseEndpoint = aws.String(devEKSEndpoint)
+		})
+	}
+	eksClient := eks.NewFromConfig(awsCfg, eksOptions...)
 
 	names := make([]string, 0)
 	input := &eks.ListClustersInput{}

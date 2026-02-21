@@ -19,12 +19,78 @@ const (
 
 var defaultRegions = []string{"us-east-1", "us-west-2"}
 
+// DevEndpoints redirects Rift's AWS API calls to a local mock server.
+//
+// This is intended exclusively for local development and testing. When active,
+// Rift will bypass the normal AWS SSO token cache and use the AccessToken
+// field below instead of a real SSO session.
+//
+// To use, add a dev_endpoints block to your config.yaml:
+//
+//	dev_endpoints:
+//	  sso_endpoint: http://localhost:8080
+//	  eks_endpoint: http://localhost:8080
+//	  access_token: dev-token
+//
+// Then start the mock server:
+//
+//	go run ./tools/mockaws --topology ./tools/mockaws/topology.yaml
+//
+// Leave this block out of config.yaml entirely for normal production use.
+type DevEndpoints struct {
+	// SSOEndpoint overrides the AWS SSO service base URL.
+	// The mock server must implement the SSO REST API paths:
+	//   GET /assignment/accounts
+	//   GET /assignment/accounts/{id}/roles
+	//   GET /federation/credentials
+	SSOEndpoint string `yaml:"sso_endpoint,omitempty"`
+
+	// EKSEndpoint overrides the AWS EKS service base URL.
+	// The mock server must implement:
+	//   GET /clusters
+	//   GET /clusters/{name}
+	EKSEndpoint string `yaml:"eks_endpoint,omitempty"`
+
+	// AccessToken is sent as the SSO bearer token to the mock server,
+	// replacing the token that would normally be read from ~/.aws/sso/cache.
+	// Any non-empty string is valid; the mock server accepts all tokens.
+	AccessToken string `yaml:"access_token,omitempty"`
+
+	// KubeTokens maps cluster endpoint URLs to bearer tokens. When a cluster's
+	// endpoint matches a key in this map, Rift writes a token-based AuthInfo
+	// in kubeconfig instead of an exec-based (aws eks get-token) AuthInfo.
+	// This allows k3d or other local clusters to work without real AWS credentials.
+	KubeTokens map[string]string `yaml:"kube_tokens,omitempty"`
+}
+
+// IsActive returns true if dev endpoints have been configured, meaning Rift
+// should target the local mock server instead of real AWS.
+func (d *DevEndpoints) IsActive() bool {
+	return d != nil && (d.SSOEndpoint != "" || d.EKSEndpoint != "")
+}
+
+// KubeToken returns the bearer token for a cluster endpoint, if one is
+// configured. This is used in dev mode to bypass exec-based auth (aws eks
+// get-token) and instead use a static token that works with local clusters.
+func (d *DevEndpoints) KubeToken(endpoint string) (string, bool) {
+	if d == nil || len(d.KubeTokens) == 0 {
+		return "", false
+	}
+	tok, ok := d.KubeTokens[endpoint]
+	return tok, ok
+}
+
+// Config holds all Rift runtime configuration loaded from config.yaml.
 type Config struct {
 	SSOStartURL        string            `yaml:"sso_start_url"`
 	SSORegion          string            `yaml:"sso_region"`
 	Regions            []string          `yaml:"regions"`
 	NamespaceDefaults  map[string]string `yaml:"namespace_defaults"`
 	DiscoverNamespaces bool              `yaml:"discover_namespaces"`
+
+	// DevEndpoints optionally redirects AWS API calls to a local mock server.
+	// Omit this field entirely for normal production use.
+	DevEndpoints *DevEndpoints `yaml:"dev_endpoints,omitempty"`
 }
 
 func Default() Config {
@@ -133,7 +199,6 @@ func (c *Config) Normalize() {
 		regions = append([]string(nil), defaultRegions...)
 	}
 	c.Regions = regions
-
 	if c.NamespaceDefaults == nil {
 		c.NamespaceDefaults = map[string]string{}
 	}
@@ -151,11 +216,15 @@ func (c *Config) Normalize() {
 }
 
 func (c Config) Validate() error {
-	if c.SSOStartURL == "" {
-		return errors.New("config missing sso_start_url")
-	}
-	if c.SSORegion == "" {
-		return errors.New("config missing sso_region")
+	// In dev mode, SSO credentials come from the mock server config rather than
+	// a real SSO session, so sso_start_url and sso_region are not required.
+	if !c.DevEndpoints.IsActive() {
+		if c.SSOStartURL == "" {
+			return errors.New("config missing sso_start_url")
+		}
+		if c.SSORegion == "" {
+			return errors.New("config missing sso_region")
+		}
 	}
 	if len(c.Regions) == 0 {
 		return errors.New("config missing regions")
