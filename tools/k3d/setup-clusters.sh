@@ -23,28 +23,18 @@ TOPOLOGY_FILE="$PROJECT_ROOT/tools/mockaws/topology.yaml"
 DEV_CONFIG_FILE="$PROJECT_ROOT/tools/mockaws/dev-config.yaml"
 RIFT_CONFIG_DIR="$HOME/.config/rift"
 
-# Cluster definitions: name → API port
-declare -A CLUSTERS=(
-  [rift-dev]=6443
-  [rift-staging]=6444
-  [rift-prod]=6445
-)
-
-# Account IDs matching the mock topology
-declare -A ACCOUNT_IDS=(
-  [rift-dev]="111111111111"
-  [rift-staging]="222222222222"
-  [rift-prod]="333333333333"
-)
-
-# Account names matching the mock topology
-declare -A ACCOUNT_NAMES=(
-  [rift-dev]="dev"
-  [rift-staging]="staging"
-  [rift-prod]="production"
-)
+# Cluster definitions — parallel arrays (bash 3 compatible)
+CLUSTER_NAMES=(rift-dev rift-staging rift-prod)
+CLUSTER_PORTS=(16443 16444 16445)
+CLUSTER_ACCOUNT_IDS=("111111111111" "222222222222" "333333333333")
+CLUSTER_ACCOUNT_NAMES=(dev staging production)
 
 SAMPLE_NAMESPACES=(app monitoring logging)
+
+# Lookup helpers by index
+get_port()        { echo "${CLUSTER_PORTS[$1]}"; }
+get_account_id()  { echo "${CLUSTER_ACCOUNT_IDS[$1]}"; }
+get_account_name(){ echo "${CLUSTER_ACCOUNT_NAMES[$1]}"; }
 
 # ── Prereq checks ────────────────────────────────────────────────────────────
 
@@ -135,7 +125,8 @@ type: kubernetes.io/service-account-token
 EOF
 
   # Wait for the token to be populated
-  for i in $(seq 1 30); do
+  local attempt
+  for attempt in $(seq 1 30); do
     local token
     token=$(kubectl get secret rift-admin-token -n kube-system -o jsonpath='{.data.token}' 2>/dev/null || true)
     if [[ -n "$token" ]]; then
@@ -194,15 +185,18 @@ accounts:
 clusters:
 HEADER
 
-  for name in rift-dev rift-staging rift-prod; do
-    local port=${CLUSTERS[$name]}
-    local account_id=${ACCOUNT_IDS[$name]}
+  local idx
+  for idx in 0 1 2; do
+    local name="${CLUSTER_NAMES[$idx]}"
+    local port="${CLUSTER_PORTS[$idx]}"
+    local account_id="${CLUSTER_ACCOUNT_IDS[$idx]}"
+    local env_name="${CLUSTER_ACCOUNT_NAMES[$idx]}"
     local ca_cert
     ca_cert=$(get_ca_cert "$name")
 
     # 3 clusters per account
+    local i
     for i in 1 2 3; do
-      local env_name=${ACCOUNT_NAMES[$name]}
       local cluster_name="${env_name}-us-east-1-cluster-${i}"
       cat >> "$TOPOLOGY_FILE" <<EOF
   - account_id: "${account_id}"
@@ -244,8 +238,10 @@ dev_endpoints:
   kube_tokens:
 HEADER
 
-  for name in rift-dev rift-staging rift-prod; do
-    local port=${CLUSTERS[$name]}
+  local idx
+  for idx in 0 1 2; do
+    local name="${CLUSTER_NAMES[$idx]}"
+    local port="${CLUSTER_PORTS[$idx]}"
     local token
     token=$(get_token "$name")
     echo "    \"https://127.0.0.1:${port}\": \"${token}\"" >> "$DEV_CONFIG_FILE"
@@ -267,20 +263,23 @@ main() {
   check_prereqs
 
   echo "creating clusters..."
-  for name in rift-dev rift-staging rift-prod; do
-    create_cluster "$name" "${CLUSTERS[$name]}"
+  local idx
+  for idx in 0 1 2; do
+    create_cluster "${CLUSTER_NAMES[$idx]}" "${CLUSTER_PORTS[$idx]}"
   done
 
   echo ""
   echo "creating namespaces..."
-  for name in rift-dev rift-staging rift-prod; do
+  for idx in 0 1 2; do
+    local name="${CLUSTER_NAMES[$idx]}"
     echo "  $name: ${SAMPLE_NAMESPACES[*]}"
     create_namespaces "$name"
   done
 
   echo ""
   echo "setting up service accounts..."
-  for name in rift-dev rift-staging rift-prod; do
+  for idx in 0 1 2; do
+    local name="${CLUSTER_NAMES[$idx]}"
     echo "  $name"
     setup_service_account "$name"
   done
@@ -294,8 +293,8 @@ main() {
   echo "=== setup complete ==="
   echo ""
   echo "clusters:"
-  for name in rift-dev rift-staging rift-prod; do
-    echo "  $name → https://127.0.0.1:${CLUSTERS[$name]}"
+  for idx in 0 1 2; do
+    echo "  ${CLUSTER_NAMES[$idx]} -> https://127.0.0.1:${CLUSTER_PORTS[$idx]}"
   done
   echo ""
   echo "next steps:"
