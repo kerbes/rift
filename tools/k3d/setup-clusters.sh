@@ -78,6 +78,25 @@ create_namespaces() {
   kubectl config use-context "k3d-${name}" >/dev/null
   for ns in "${SAMPLE_NAMESPACES[@]}"; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    # Deploy a small pod so k9s has something to show
+    kubectl apply -n "$ns" -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-${ns}
+  labels:
+    app: demo
+    component: ${ns}
+spec:
+  containers:
+    - name: worker
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
+      resources:
+        limits:
+          memory: "16Mi"
+          cpu: "10m"
+EOF
   done
 }
 
