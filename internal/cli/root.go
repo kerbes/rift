@@ -140,7 +140,7 @@ func (a *App) RunSync(ctx context.Context, dryRun bool) (SyncReport, error) {
 	st := naming.BuildState(cfg, inv)
 	nsResult := namespaces.Result{}
 	if cfg.DiscoverNamespaces {
-		nsResult, err = namespaces.Enrich(ctx, &st, a.Logger)
+		nsResult, err = namespaces.Enrich(ctx, &st, cfg, a.Logger)
 		if err != nil {
 			return SyncReport{}, fmt.Errorf("discover namespaces: %w", err)
 		}
@@ -159,7 +159,7 @@ func (a *App) RunSync(ctx context.Context, dryRun bool) (SyncReport, error) {
 	if err != nil {
 		return SyncReport{}, fmt.Errorf("sync aws config: %w", err)
 	}
-	kubeResult, err := kubeconfig.Sync(kubeConfigPath, st, dryRun)
+	kubeResult, err := kubeconfig.Sync(kubeConfigPath, st, cfg, dryRun)
 	if err != nil {
 		return SyncReport{}, fmt.Errorf("sync kubeconfig: %w", err)
 	}

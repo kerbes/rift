@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/phenixrizen/rift/internal/config"
 	"github.com/phenixrizen/rift/internal/state"
 	"k8s.io/client-go/tools/clientcmd"
 	api "k8s.io/client-go/tools/clientcmd/api"
@@ -18,7 +19,7 @@ type SyncResult struct {
 	RemovedContexts int
 }
 
-func Sync(path string, st state.State, dryRun bool) (SyncResult, error) {
+func Sync(path string, st state.State, appCfg config.Config, dryRun bool) (SyncResult, error) {
 	cfg, err := loadConfig(path)
 	if err != nil {
 		return SyncResult{}, err
@@ -57,21 +58,26 @@ func Sync(path string, st state.State, dryRun bool) (SyncResult, error) {
 			Server:                   cluster.ClusterEndpoint,
 			CertificateAuthorityData: caData,
 		}
-		desiredUser := &api.AuthInfo{
-			Exec: &api.ExecConfig{
-				APIVersion: "client.authentication.k8s.io/v1beta1",
-				Command:    "aws",
-				Args: []string{
-					"eks",
-					"get-token",
-					"--profile",
-					cluster.AWSProfile,
-					"--cluster-name",
-					cluster.ClusterName,
-					"--region",
-					cluster.Region,
+		var desiredUser *api.AuthInfo
+		if tok, ok := appCfg.DevEndpoints.KubeToken(cluster.ClusterEndpoint); ok {
+			desiredUser = &api.AuthInfo{Token: tok}
+		} else {
+			desiredUser = &api.AuthInfo{
+				Exec: &api.ExecConfig{
+					APIVersion: "client.authentication.k8s.io/v1beta1",
+					Command:    "aws",
+					Args: []string{
+						"eks",
+						"get-token",
+						"--profile",
+						cluster.AWSProfile,
+						"--cluster-name",
+						cluster.ClusterName,
+						"--region",
+						cluster.Region,
+					},
 				},
-			},
+			}
 		}
 		desiredContext := &api.Context{
 			Cluster:  ctxName,
@@ -151,6 +157,10 @@ func clusterEqual(a, b *api.Cluster) bool {
 func userEqual(a, b *api.AuthInfo) bool {
 	if a == nil || b == nil {
 		return a == b
+	}
+	// If either side uses token auth, compare tokens.
+	if a.Token != "" || b.Token != "" {
+		return a.Token == b.Token
 	}
 	if a.Exec == nil || b.Exec == nil {
 		return a.Exec == b.Exec
